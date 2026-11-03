@@ -15,6 +15,33 @@ padding) per read. `agent_gather.rs` uses it for `ProtoType::Tcp` URLs. UDP gath
 TLS trusts the system certificate store (`rustls-native-certs`, as OpenSSL does) plus the bundled
 Mozilla roots. A name mismatch is accepted only when the TURN URL is an IP literal.
 
+The application now enables direct TCP/TLS gathering by default. `UU_USE_PROXY` selects
+whether an environment HTTP proxy is used; it no longer gates stream relay availability.
+
+## Controlled-side path re-nomination
+
+The official Windows 4.44.0.3919 `streamer.dll` contains the diagnostic
+`filter_network_monitor loss rate is too high, try to switch to relay, prefer udp` and
+the ICE option `renomination`. Upstream's controlled selector only selected a pair
+while no pair was selected, preventing an established direct path from following a
+new nomination. It also forgot nominations received before a triggered check succeeded.
+
+The controlled selector now follows authenticated `USE-CANDIDATE` requests for valid
+pairs and libwebrtc's increasing UInt32 `NOMINATION` attribute (`0xC001`). The latest
+pending nomination is retained until its triggered check succeeds. Numeric stale, zero,
+malformed, and superseded nominations cannot replace the selected route; duplicates
+do not emit a pair-change notification. A mutex serializes selection across candidate
+receive loops. Counters and pending state reset with ICE restart.
+
+`vendor/webrtc` advertises `a=ice-options:trickle renomination` for this receive capability.
+Selection updates the existing `AgentConn`; DTLS/SRTP/SCTP are not recreated. The official
+controller still decides when and which route to nominate. This patch does not add an
+independent host-side loss threshold or change the controlling selector.
+
+Protocol references: libwebrtc [connection.cc](https://github.com/webrtc-mirror/webrtc/blob/main/p2p/base/connection.cc)
+(`HandleBindingRequest`, request construction) and [stun.h](https://github.com/webrtc-mirror/webrtc/blob/main/api/transport/stun.h).
+See [relay acceptance notes](../../docs/relay-fallback.md) for verification limits.
+
 ## Round-trip time
 
 Upstream never measures it: `CandidatePairStats::current_round_trip_time` is always 0. A successful

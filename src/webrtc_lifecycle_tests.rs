@@ -40,7 +40,9 @@ async fn connect(desktop: bool, portal: Option<Arc<crate::desktop_session::Porta
     gathered.recv().await;
     host.pc.set_remote_description(pc.local_description().await.unwrap()).await.unwrap();
     let mut gathered = host.pc.gathering_complete_promise().await;
-    host.pc.set_local_description(host.pc.create_answer(None).await.unwrap()).await.unwrap();
+    let answer = host.pc.create_answer(None).await.unwrap();
+    assert!(answer.sdp.lines().any(|line| line == "a=ice-options:trickle renomination"));
+    host.pc.set_local_description(answer).await.unwrap();
     gathered.recv().await;
     pc.set_remote_description(host.pc.local_description().await.unwrap()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(8), async {

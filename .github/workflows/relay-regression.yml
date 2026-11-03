@@ -1,0 +1,24 @@
+name: Relay regression
+
+on:
+  push:
+    branches: [fix/relay-fallback]
+  pull_request:
+    paths:
+      - src/session_ice.rs
+      - vendor/webrtc-ice/**
+      - vendor/webrtc/src/peer_connection/sdp/**
+      - .github/workflows/relay-regression.yml
+  workflow_dispatch:
+
+jobs:
+  relay:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y pkg-config libx11-dev libxext-dev libxtst-dev libxfixes-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+      # Dependency unit tests are not run by the root package's cargo test.
+      - run: cargo test --manifest-path vendor/webrtc-ice/Cargo.toml --lib relay_switch_tests

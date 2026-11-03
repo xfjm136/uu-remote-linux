@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
 use arc_swap::ArcSwapOption;
 use util::sync::Mutex as SyncMutex;
@@ -47,6 +47,7 @@ pub struct AgentInternal {
 
     pub(crate) start_time: SyncMutex<Instant>,
     pub(crate) nominated_pair: Mutex<Option<Arc<CandidatePair>>>,
+    pub(crate) remote_nomination: AtomicU32,
 
     pub(crate) connection_state: AtomicU8, //ConnectionState,
 
@@ -118,6 +119,7 @@ impl AgentInternal {
 
             start_time: SyncMutex::new(Instant::now()),
             nominated_pair: Mutex::new(None),
+            remote_nomination: AtomicU32::new(0),
 
             connection_state: AtomicU8::new(ConnectionState::New as u8),
 

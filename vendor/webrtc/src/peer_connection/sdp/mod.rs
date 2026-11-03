@@ -843,6 +843,8 @@ pub(crate) async fn populate_sdp(
         d = d.with_value_attribute(ATTR_KEY_ICELITE.to_owned(), ATTR_KEY_ICELITE.to_owned());
     }
 
+    // The patched ICE controlled selector accepts libwebrtc's NOMINATION counter.
+    d = d.with_value_attribute("ice-options".to_owned(), "trickle renomination".to_owned());
     Ok(d.with_value_attribute(ATTR_KEY_GROUP.to_owned(), bundle_value))
 }
 

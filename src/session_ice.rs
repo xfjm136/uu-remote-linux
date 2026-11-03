@@ -56,18 +56,22 @@ impl SessionIce {
     }
 }
 
-/// With `UU_USE_PROXY=1`, also gather TURN relays over TCP/TLS (through the HTTP proxy when
-/// one is configured); hosts whose UDP cannot reach the TURN servers then still get a relay.
+/// Gather cloud TURN relays over TCP/TLS even without an HTTP proxy. The proxy switch
+/// controls proxy use, not whether a UDP-blocked host can gather a stream relay.
 pub fn configure_relay_transport() {
-    if !crate::auth::proxy_enabled() { return; }
-    let value = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"].iter().find_map(|name| std::env::var(name).ok()).filter(|v| !v.is_empty());
-    let proxy = match value.as_deref().map(relay_proxy) {
-        Some(Ok(proxy)) => Some(proxy),
-        Some(Err(reason)) => { log::warn!("TURN over TCP/TLS disabled: {reason}"); return; }
-        None => None,
+    let value = if crate::auth::proxy_enabled() {
+        ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"].iter().find_map(|name| std::env::var(name).ok()).filter(|v| !v.is_empty())
+    } else { None };
+    let transport = match relay_transport(value.as_deref()) {
+        Ok(transport) => transport,
+        Err(reason) => { log::warn!("TURN over TCP/TLS disabled: {reason}"); return; }
     };
-    log::info!("TURN over TCP/TLS enabled: via_http_proxy={}", proxy.is_some());
-    webrtc::ice::agent::turn_tcp::set_relay_transport(webrtc::ice::agent::turn_tcp::RelayTransport { http_proxy: proxy });
+    log::info!("TURN over TCP/TLS enabled: via_http_proxy={}", transport.http_proxy.is_some());
+    webrtc::ice::agent::turn_tcp::set_relay_transport(transport);
+}
+
+fn relay_transport(proxy: Option<&str>) -> Result<webrtc::ice::agent::turn_tcp::RelayTransport, &'static str> {
+    Ok(webrtc::ice::agent::turn_tcp::RelayTransport { http_proxy: proxy.map(relay_proxy).transpose()? })
 }
 
 /// `host:port` of an unauthenticated HTTP proxy URL; never echoes the value.
@@ -84,6 +88,12 @@ fn relay_proxy(value: &str) -> Result<String, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stream_relays_are_available_without_a_proxy() {
+        assert!(relay_transport(None).unwrap().http_proxy.is_none());
+        assert_eq!(relay_transport(Some("http://proxy.invalid:3128")).unwrap().http_proxy.as_deref(), Some("proxy.invalid:3128"));
+        assert!(relay_transport(Some("socks5://proxy.invalid:1080")).is_err());
+    }
     #[test]
     fn cloud_credentials_are_scoped_to_peer_and_relay_policy_is_honored() {
         let config=SessionIce::from_header(&serde_json::json!({"data":{"iceServers":[{"urls":["turn:example.invalid:3478?transport=udp"],"username":"test-user","credential":"test-secret"}],"force_relay":true}})).configuration().unwrap();
