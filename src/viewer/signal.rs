@@ -130,6 +130,7 @@ impl Signal {
         if let Some(v)=self.pending.pop_front(){return Ok(v)}
         loop {if let Packet::Event(v)=self.packet().await?{return Ok(v)}}
     }
+    pub async fn forward_setting(&mut self,value:Value)->Result<(),String> {self.send(Message::Text(format!("42{}",serde_json::json!(["forward_setting",value])))).await}
     pub async fn soac(&mut self, value:Value)->Result<(),String> {self.send(Message::Text(format!("42{}",serde_json::json!(["soac",value])))).await}
     pub async fn close(&mut self) {let _=self.ws.close(None).await;}
 }

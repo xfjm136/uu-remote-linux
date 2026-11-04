@@ -603,3 +603,8 @@ SDL 控制端可通过现有桌面 CONTROL 通道向 Windows 被控端转发一�
 不支持 Guide 键、多手柄和自适应扳机；休眠、强制退出及断网恢复尚未全面验证。
 一名报告用户在一组 Windows + Steam Deck 上测试了输入、手机热点、重连与震动。
 详见[协议证据、设计与限制](docs/deckpad-native-gamepad.md)。
+
+
+### Linux 主控 Windows 的中转切换
+
+需构建并运行 `uuremote-viewer`（`--features native-viewer,viewer-sdl`）。viewer 支持 Windows 的 `switch_network_notify`、在原连接上发起/应答 `restart_ice`，并在云端允许时按视频丢包/RTT 请求中转。前面的 Linux 被控端修复仍保留。已通过 Linux 主控方向的真实 TURN 数据通道及 H.264 RTP 回归，官方 Windows 实机弱网验收仍待完成。见 [方向说明和测试步骤](docs/relay-fallback.md)。

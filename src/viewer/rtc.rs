@@ -1,3 +1,4 @@
+mod relay;
 use super::wire::{self, Shape, CHANNELS};
 use serde_json::{json, Value};
 use std::sync::{Arc,atomic::{AtomicBool,AtomicU32,AtomicU64,Ordering}};
@@ -51,6 +52,12 @@ pub struct Peer {
     pub observed:Arc<Observed>,
     pub desktop:super::desktop::Desktop,
     pub audio:super::audio::Audio,
+    relay_servers:Vec<RTCIceServer>,
+    relay_policy:crate::relay::Config,
+    relay_monitor:crate::relay::Monitor,
+    relay_previous:(u64,u64),
+    restart_pending:bool,
+    signal_outbound:mpsc::Sender<Value>,
     answered:bool,
     early:Vec<RTCIceCandidateInit>,
     app_id:String,
@@ -78,6 +85,8 @@ impl Peer {
         }
         let registry=webrtc::api::interceptor_registry::register_default_interceptors(webrtc::interceptor::registry::Registry::new(),&mut engine).map_err(|_|"RTP interceptor initialization failed")?;
         let api=APIBuilder::new().with_media_engine(engine).with_setting_engine(settings).with_interceptor_registry(registry).build();
+        let relay_servers=config.ice_servers.clone();
+        let signal_outbound=outbound.clone();
         let pc=Arc::new(api.new_peer_connection(config).await.map_err(|e|format!("Peer creation failed: {}",crate::auth::transport_error(&e)))?);
         let tools:super::tools::Inbox=Arc::new(std::sync::Mutex::new(None));
         let rumble=super::native_rumble::Feedback::default();
@@ -259,7 +268,7 @@ impl Peer {
             Ok::<_,String>((channels,tools,clipboard))
         }.await;
         match result {
-            Ok((channels,tools,clipboard))=>Ok(Self{clipboard,tools,rumble,cursor,pc,channels,observed,desktop,audio,answered:false,early:Vec::new(),app_id:app_id.into(),ice_id:ice_id.into(),remote_client:remote_client.into()}),
+            Ok((channels,tools,clipboard))=>Ok(Self{clipboard,tools,rumble,cursor,pc,channels,observed,desktop,audio,relay_servers,relay_policy:Default::default(),relay_monitor:Default::default(),relay_previous:(0,0),restart_pending:false,signal_outbound,answered:false,early:Vec::new(),app_id:app_id.into(),ice_id:ice_id.into(),remote_client:remote_client.into()}),
             Err(e)=>{let _=pc.close().await;Err(e)},
         }
     }
@@ -282,6 +291,7 @@ impl Peer {
         let body=event.get("data").unwrap_or(event);
         if !self.matches_route(event) {return Ok(())}
         match body.get("type").and_then(Value::as_str) {
+            Some("restart_ice")=> {self.receive_restart(body).await?;}
             Some("answer")=> {
                 if self.answered {return Ok(())}
                 let sdp=answer_sdp(body)?;

@@ -687,3 +687,8 @@ Default OFF: set `UU_VIEWER_NATIVE_GAMEPAD=1` to enable input; `UU_VIEWER_NATIVE
 Guide forwarding, multiple controllers and adaptive triggers are unsupported; suspend, forced exit and network recovery are not comprehensively verified.
 One reporting user tested input, phone-hotspot WAN, reconnect and rumble on one Windows/Steam Deck pair.
 See [protocol evidence, design and limits](docs/deckpad-native-gamepad.md).
+
+
+### Linux controller to Windows: relay switching
+
+Build and run `uuremote-viewer` with `--features native-viewer,viewer-sdl`. The viewer handles Windows `switch_network_notify`, initiates/answers `restart_ice` on the existing peer, and requests relaying from fresh video loss/RTT samples when enabled by cloud policy. Earlier Linux host changes are retained. A real TURN regression verifies the controller direction, original data-channel round trips and incoming H.264 RTP; official Windows weak-network acceptance is pending. See [direction and acceptance notes](docs/relay-fallback.md).

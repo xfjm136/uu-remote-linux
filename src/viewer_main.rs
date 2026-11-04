@@ -5,6 +5,9 @@
 #[path = "i18n.rs"] mod i18n;
 #[path = "protocol.rs"] mod protocol;
 mod ws_transport;
+mod relay;
+mod session_ice;
+#[cfg(test)] mod test_network;
 mod viewer;
 #[cfg(test)] #[path="hevc.rs"] mod hevc;
 use viewer::clipboard;

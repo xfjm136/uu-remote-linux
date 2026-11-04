@@ -2,6 +2,33 @@
 
 
 
+
+## 2026-11-04：Linux 主控端控制 Windows（本次明确目标）
+
+本轮基于 `b2a9b1e99cf43700b2f0526d27d90e6c74c8140e` **追加**，完整保留前面的 Linux 被控端修改。前面的 `src/main.rs` / `src/webrtc.rs` 是 Linux 被控端入口，不能据此声称 Linux viewer 已支持切网。实际主控程序为 **`uuremote-viewer`**，代码在 `src/viewer/`。
+
+原 viewer 的缺口是：忽略 `forward_setting`；SOAC 仅应用首次 `answer`，忽略 `restart_ice`；没有调用 TCP/TLS TURN 初始化。现在：
+
+- `src/viewer/session.rs` 在打开连接时启用现有 TCP/TLS TURN 传输、保留云端自动切网参数；在所有运行模式都经过的 `step()` 中处理 1 Hz 质量采样及 Windows 发来的切网通知。
+- `src/viewer/rtc/relay.rs` 校验通知所属 ice_id/client route，按云端 TURN 配置更新下一代候选策略，在原 viewer PeerConnection 上发送 `restart_ice`。处理重启 answer、排队新一代早到候选；也可响应 Windows 主动发来的 restart offer。重复请求和其他会话的通知不会替换当前连接。
+- viewer 根据新到达的视频包的序号跨度/接收增量及现有测量 RTT 生成弱网样本；按云端开关和阈值发送官方 `switch_network_notify`。无新包时不重复使用累计统计制造新样本。
+- 前面的被控端及共享 ICE 改动均保留；viewer 仍只使用云端 control ack 提供的 ICE 地址和凭据，没有接入被控端的公共 STUN 默认值。
+
+新增 **Linux 主控方向** 的真实 TURN 回归：建立 viewer → 模拟 Windows 被控端连接，确认初始直连，模拟 Windows 发来 `switch_network_notify`，由 Linux viewer 发起中转重启，真实完成 TURN allocation 后确认 relay 路径。验证原文件数据通道重启前后可双向往返、原 PC 没有更换，模拟 Windows 发送的 H.264 RTP 经中转到达 Linux viewer。另检查重复和其他会话通知。模拟被控端不是官方 Windows 可执行文件；没有把该回归描述为官方实机验收。
+
+本地验证：viewer 全量串行 **192 通过**，被控端 **318 通过、8 跳过**。CI 同时加入 viewer 回归及 `native-viewer,viewer-sdl` 桌面主控编译。Linux 测试目录为 `/tmp/uu-viewer-relay`。
+
+测试此方向需要重建并运行 viewer，而不是只更新 server：
+
+```sh
+cargo build --locked --release --features native-viewer,viewer-sdl --bin uuremote-viewer
+./target/release/uuremote-viewer ui
+```
+
+本机需有项目原有的 SDL2 / GTK3 开发依赖及 FFmpeg 运行时。先以正常网络连接 Windows，再在隔离测试环境施加弱网，观察 `Viewer relay restart offer` 和实际中转路径、画面/输入连续性。自动发起弱网通知仍受云端 `auto_switch_network` 及 force 阈值控制；收到 Windows 的合法切网通知不要求 Linux 本地自动检测开关开启。
+
+官方 Windows 实机、网易云 TURN/TLS 和复杂弱网下的最终验收仍待完成，不能声称完美等价。
+
 ## 2026-11-04：主动通知、重启发起及真实 TURN 迁移
 
 本轮基线为 `a0a5ccd4c0c0ca65e66a13daf7e18a0c2181c4d1`，保留已有 relay 分支全部更新。

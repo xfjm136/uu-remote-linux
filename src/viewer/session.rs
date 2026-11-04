@@ -5,9 +5,10 @@ use tokio::sync::mpsc;
 use webrtc::api::setting_engine::SettingEngine;
 
 pub struct Options {pub timeout:Duration,pub legacy_prefix:bool,pub ready_policy:ReadyPolicy,pub clipboard:super::clipboard::Bridge}
-pub struct Session {pub peer:Peer,signal:Signal,candidates:mpsc::Receiver<Value>,policy:ReadyPolicy}
+pub struct Session {pub peer:Peer,signal:Signal,candidates:mpsc::Receiver<Value>,policy:ReadyPolicy,quality:tokio::time::Interval}
 impl Session {
     pub async fn open(room:&JoinData,shape:&Shape,device:&str,client:&str,options:Options,settings:SettingEngine)->Result<Self,String> {
+        crate::session_ice::configure_relay_transport();
         shape.validate_session()?;
         let shape=shape.video_preferences(std::env::var("UU_VIEWER_CODEC").is_ok_and(|v|v.eq_ignore_ascii_case("h264")));
         shape.validate_session()?;
@@ -33,7 +34,8 @@ impl Session {
             let remote=result.get("client_id").and_then(Value::as_str).filter(|s|!s.is_empty()).ok_or("Control acknowledgement missing peer route")?;
             let config=rtc::configuration(&result)?;
             let(tx,rx)=mpsc::channel(256);
-            let peer=Peer::new(config,&shape,&app,&ice,remote,tx,settings,options.clipboard).await?;
+            let mut peer=Peer::new(config,&shape,&app,&ice,remote,tx,settings,options.clipboard).await?;
+            peer.configure_relay(&result, shape.capture_type == 1);
             // The official host drops an offer whose ice_id is not yet in its connection table
             // (libstreamer 0xc3080); give it time to process be-controlled first.
             let delay=std::env::var("UU_VIEWER_OFFER_DELAY_MS").ok().and_then(|v|v.parse().ok()).unwrap_or(0u64).min(10_000);
@@ -44,12 +46,13 @@ impl Session {
             }
         }.await;
         match result {
-            Ok((peer,candidates))=>Ok(Self{peer,signal,candidates,policy:options.ready_policy}),
+            Ok((peer,candidates))=>Ok(Self{peer,signal,candidates,policy:options.ready_policy,quality:tokio::time::interval(Duration::from_secs(1))}),
             Err(e)=>{signal.close().await;Err(e)},
         }
     }
     pub async fn step(&mut self)->Result<(),String> {
         tokio::select! {
+            _=self.quality.tick()=> {if let Some(notification)=self.peer.quality_notification().await {self.signal.forward_setting(notification).await?;}},
             candidate=self.candidates.recv()=>if let Some(candidate)=candidate {self.signal.soac(candidate).await?},
             event=self.signal.event()=> {
                 let event=event?;
@@ -57,6 +60,13 @@ impl Session {
                 log::info!("Viewer signaling event: name={} soac_type={}",event.get(0).and_then(Value::as_str).unwrap_or("-"),
                     event.get(1).and_then(|b|b.get("type").or_else(||b.get("data").and_then(|d|d.get("type")))).and_then(Value::as_str).unwrap_or("-"));
                 match event.get(0).and_then(Value::as_str) {
+                    Some("forward_setting")=>if let Some(body)=event.get(1) {
+                        match self.peer.switch_notification(body).await {
+                            Ok(Some(offer))=>self.signal.soac(offer).await?,
+                            Ok(None)=>{},
+                            Err(_)=>log::warn!("Viewer relay request could not start negotiation (details omitted)"),
+                        }
+                    },
                     Some("soac")=>if let Some(body)=event.get(1) {self.peer.receive(body).await?},
                     Some("released"|"left"|"leave")=> {
                         // An event for another peer must not tear down this session.

@@ -23,6 +23,73 @@ async fn virtual_network()->(SettingEngine,SettingEngine,Arc<Mutex<Router>>) {
 }
 fn shape()->Shape {serde_json::from_str(include_str!("../../tests/fixtures/viewer/session-shape.json")).unwrap()}
 
+#[tokio::test]
+async fn linux_controller_relay_keeps_windows_host_media_and_file_channel() {
+    tokio::time::timeout(Duration::from_secs(30),async {
+        let (settings,host_settings,router)=virtual_network().await;
+        let turn=crate::test_network::turn_server(&router).await;
+        let config=rtc::configuration(&json!({"iceServers":[{"urls":"turn:192.0.2.3:3478?transport=udp","username":"test-user","credential":"test-password"}]})).unwrap();
+        let (tx,_rx)=mpsc::channel(256);
+        let mut peer=Peer::new(config,&shape(),"test-app","test-ice","test-host",tx,settings,super::clipboard::Bridge::new(false)).await.unwrap();
+        let mut engine=MediaEngine::default();engine.register_default_codecs().unwrap();
+        let host=Arc::new(APIBuilder::new().with_media_engine(engine).with_setting_engine(host_settings).build().new_peer_connection(RTCConfiguration::default()).await.unwrap());
+        let video=Arc::new(webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP::new(
+            webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability{mime_type:"video/H264".into(),clock_rate:90000,sdp_fmtp_line:"level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".into(),..Default::default()},"video".into(),"synthetic-windows".into()));
+        host.add_track(video.clone()).await.unwrap();
+        host.on_data_channel(Box::new(|channel|Box::pin(async move {
+            if channel.label()==wire::CHANNELS[3] {
+                let weak=Arc::downgrade(&channel);
+                channel.on_message(Box::new(move |m|{let weak=weak.clone();Box::pin(async move {
+                    if let Some(channel)=weak.upgrade(){let _=channel.send(&m.data).await;}
+                })}));
+            }
+        })));
+        let mut gathered=peer.pc.gathering_complete_promise().await;
+        peer.offer().await.unwrap();gathered.recv().await;
+        host.set_remote_description(peer.pc.local_description().await.unwrap()).await.unwrap();
+        let mut gathered=host.gathering_complete_promise().await;
+        host.set_local_description(host.create_answer(None).await.unwrap()).await.unwrap();gathered.recv().await;
+        peer.receive(&json!({"data":{"type":"answer","ice_id":"test-ice","sdp":host.local_description().await.unwrap().sdp}})).await.unwrap();
+        while peer.channels[3].ready_state()!=webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {tokio::time::sleep(Duration::from_millis(10)).await;}
+        let channel=peer.channels[3].clone();let original=peer.pc.clone();
+        let before=peer.pc.dtls_transport().ice_transport().get_selected_candidate_pair().await.unwrap();
+        assert!(!before.to_string().contains(" relay "),"Fixture did not establish an initial direct path");
+        let (inbox,mut received)=mpsc::channel(16);*peer.tools.lock().unwrap()=Some(inbox);
+        channel.send(&bytes::Bytes::from_static(b"before-relay")).await.unwrap();
+        assert_eq!(received.recv().await.unwrap().1,b"before-relay");
+        let foreign=crate::relay::notification("test-host","other-ice",crate::relay::Stage::Udp);
+        assert!(peer.switch_notification(&foreign).await.unwrap().is_none());
+        let request=crate::relay::notification("test-host","test-ice",crate::relay::Stage::Udp);
+        let offer=peer.switch_notification(&request).await.unwrap().unwrap();
+        assert_eq!(offer["data"]["type"],"restart_ice");
+        assert!(peer.switch_notification(&request).await.is_err());
+        let mut gathered=peer.pc.gathering_complete_promise().await;gathered.recv().await;
+        let offer=peer.pc.local_description().await.unwrap();
+        assert!(offer.sdp.lines().any(|l|l.starts_with("a=candidate:")&&l.contains(" typ relay")));
+        host.set_remote_description(offer).await.unwrap();
+        let mut gathered=host.gathering_complete_promise().await;
+        host.set_local_description(host.create_answer(None).await.unwrap()).await.unwrap();gathered.recv().await;
+        peer.receive(&json!({"data":{"type":"restart_ice","ice_id":"test-ice","sdp":host.local_description().await.unwrap().sdp}})).await.unwrap();
+        loop {
+            let pair=peer.pc.dtls_transport().ice_transport().get_selected_candidate_pair().await;
+            if pair.is_some_and(|p|p.to_string().contains(" relay "))&&peer.pc.connection_state()==webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Connected {break;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(Arc::ptr_eq(&original,&peer.pc));
+        channel.send(&bytes::Bytes::from_static(b"after-relay")).await.unwrap();
+        assert_eq!(received.recv().await.unwrap().1,b"after-relay");
+        use webrtc::track::track_local::TrackLocalWriter;
+        for seq in 1..30 {
+            video.write_rtp(&webrtc::rtp::packet::Packet{header:webrtc::rtp::header::Header{version:2,sequence_number:seq,timestamp:u32::from(seq)*3000,marker:true,..Default::default()},payload:bytes::Bytes::from_static(&[0x65,1])}).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if peer.observed.video_received.load(Ordering::Relaxed)>0{break;}
+        }
+        assert!(peer.observed.video_received.load(Ordering::Relaxed)>0,"Windows-style host video did not arrive through relay");
+
+        peer.close().await;host.close().await.unwrap();turn.close().await.unwrap();router.lock().await.stop().await.unwrap();
+    }).await.expect("Linux controller to Windows-style host relay migration timed out");
+}
+
 #[test]
 fn ice_configuration_preserves_credentials_without_public_fallback() {
     let result=json!({"iceServers":[{"urls":"turn:relay.example.invalid:3478","username":"synthetic-user","credential":"synthetic-pass"}],"force_relay":true});
