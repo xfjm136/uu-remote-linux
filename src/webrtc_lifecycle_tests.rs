@@ -9,6 +9,54 @@ use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc;
 
 type Messages = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
+#[tokio::test]
+async fn official_restart_ice_preserves_control_channel_and_context() {
+    tokio::time::timeout(Duration::from_secs(25), async {
+        let (host, mut viewer) = connect(false, None).await;
+        let original_pc = Arc::clone(&host.pc);
+        let original_channel = Arc::clone(&viewer.channels["CONTROL_DATA_CHANNEL"]);
+        {
+            let mut ctx = host.context.lock().await;
+            ctx.client_id = Some("synthetic-viewer".into());
+            ctx.ice_id = Some(serde_json::json!("synthetic-ice"));
+            ctx.app_control_id = Some(serde_json::json!(7));
+        }
+        original_channel.send(&echo_request(70).into()).await.unwrap();
+        assert!(receive(&mut viewer.messages, 3, Duration::from_secs(3)).await.is_some());
+        let old_sdp = viewer.pc.local_description().await.unwrap().sdp;
+        let offer = viewer.pc.create_offer(Some(webrtc::peer_connection::offer_answer_options::RTCOfferOptions {
+            ice_restart: true, ..Default::default()
+        })).await.unwrap();
+        let mut gathered = viewer.pc.gathering_complete_promise().await;
+        viewer.pc.set_local_description(offer).await.unwrap();
+        gathered.recv().await;
+        let offer = viewer.pc.local_description().await.unwrap();
+        let credential = |s: &str| s.lines().find(|l| l.starts_with("a=ice-ufrag:")).unwrap().to_owned();
+        assert_ne!(credential(&old_sdp), credential(&offer.sdp));
+        let response = host.answer_restart(&SoacMessage { msg_type: "restart_ice".into(),
+            sdp: Some(offer.sdp), gzip_sdp: None, candidate: None,
+            ice_id: Some(serde_json::json!("synthetic-ice")), client_id: None,
+            app_control_id: None, sdp_mid: None, sdp_mline_index: None }).await.unwrap();
+        assert_eq!(response.msg_type, "restart_ice");
+        assert_eq!(response.client_id.as_deref(), Some("synthetic-viewer"));
+        assert_eq!(response.app_control_id, Some(serde_json::json!(7)));
+        let mut gathered = host.pc.gathering_complete_promise().await;
+        gathered.recv().await;
+        viewer.pc.set_remote_description(host.pc.local_description().await.unwrap()).await.unwrap();
+        // Wait for the restarted ICE path before sending through the original SCTP channel.
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while host.pc.ice_connection_state() != webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Connected || viewer.pc.ice_connection_state() != webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Connected {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        assert!(Arc::ptr_eq(&host.pc, &original_pc));
+        original_channel.send(&echo_request(71).into()).await.unwrap();
+        assert!(receive(&mut viewer.messages, 3, Duration::from_secs(8)).await.is_some(), "post-restart Echo missing");
+        viewer.pc.close().await.unwrap();
+        host.pc.close().await.unwrap();
+        viewer.router.lock().await.stop().await.unwrap();
+    }).await.expect("official ICE restart did not preserve the existing session");
+}
 struct Viewer {
     pc: Arc<RTCPeerConnection>,
     channels: HashMap<String, Arc<RTCDataChannel>>,
@@ -166,7 +214,7 @@ async fn pending_portal_answers_echo_immediately_and_defers_capture_settings() {
 
         // A capture setting arriving during the same pending window is queued, not dropped.
         let mut setting = Vec::new();
-        field_varint(2, 2, &mut setting);  // quality = General (高清 2M)
+        field_varint(2, 2, &mut setting);  // quality = General (楂樻竻 2M)
         field_varint(18, 30, &mut setting); // fpsCount = 30
         field_varint(5, 1920, &mut setting);
         field_varint(6, 1080, &mut setting);

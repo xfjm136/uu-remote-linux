@@ -5,6 +5,9 @@ on:
     branches: [fix/relay-fallback]
   pull_request:
     paths:
+      - src/main.rs
+      - src/webrtc.rs
+      - src/webrtc_lifecycle_tests.rs
       - src/session_ice.rs
       - vendor/webrtc-ice/**
       - vendor/webrtc/src/peer_connection/sdp/**

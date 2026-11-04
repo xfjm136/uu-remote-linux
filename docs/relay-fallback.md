@@ -1,5 +1,23 @@
 # 会话内中转切换修复 / Relay fallback
 
+
+## 2026-11-04：补齐官方 `restart_ice` 信令（基于更新后的分支）
+
+修复基线为 `0221f453530ccbb65ecbeb08d8e8f2ca9ceacde6`（v0.2.48），保留分支已有的 UI、防窥、媒体等更新。上次补丁只修复候选收集和重提名，实际弱网切换仍未得到用户验证；这次静态反编译确认还漏掉了官方自定义的协商类型。
+
+官方 4.44.0.3919 隔离副本的调用依据：
+
+- `streamer.dll!sub_180DF1B90` 设置连接配置并创建新 offer，随后发送 `restart_ice`，诊断包含 `ice_transport_type`。
+- `sub_180A03942` 将 SOAC `data.type=restart_ice` 与 offer/answer 一样解析 SDP（支持 gzip）。
+- `sub_180DE3D80` 明确接受 `offer` **或** `restart_ice` 并将 SDP 交给已有连接。
+- `sub_180DDBFC0` 依据 restart 标志选择应答类型：普通协商为 `answer`，重启协商为 `restart_ice`。
+
+原 Linux 主循环只处理 `offer` 和 `candidate`，导致中转切换发来的 `restart_ice` 被忽略。现在 `src/main.rs` 按 ice_id 找到原会话，调用 `src/webrtc.rs::answer_restart` 在原 PeerConnection 上应用新 offer 并回复 `restart_ice`。不会走新建桌面连接的替换/关闭逻辑，也不会消费下一次 be-controlled 的配置。若重启消息未重复携带 client_id/app_control_id，会保留原会话上下文；未知会话只记录固定警告并忽略。
+
+新增真实虚拟网络通信回归：先通过 CONTROL 收发 Echo，再生成不同 ICE 凭据的 restart offer，重新交换候选和 SDP，验证双方恢复 Connected、仍复用原 PeerConnection/CONTROL 通道，且重启后的 Echo 能往返。它验证协商后仍能传输，不能替代官方客户端经云端 TURN 的真实弱网验收。测试中必须等待**新一代** ICE 收集完成；沿用上一代已完成的 promise 会造成候选未交换的假失败。
+
+本次在 `/tmp/uu-relay-v48` 验证：主机完整测试 **314 通过、8 跳过、0 失败**；viewer **182 通过、0 失败**。新增的重启通信回归已通过。没有修改、注入或重启已安装的官方 UU 客户端。
+
 ## 修复的缺口
 
 原实现已有云端 TURN 配置及 UDP 中转，并非完全没有中转。这里修复两个具体问题：

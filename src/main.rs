@@ -1068,6 +1068,22 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                             }},
                             Err(_) => log::error!("Create peer failed (details omitted)"),
                         }
+                    } else if soac.msg_type == "restart_ice" {
+                        // Official streamer 4.44: sub_180DE3D80 dispatches restart_ice
+                        // as an offer; sub_180DDBFC0 answers with the same wire type.
+                        // Keep the peer, media and independent tool sessions alive.
+                        if let Some(sess) = sessions.get(&ice) {
+                            match sess.answer_restart(&soac).await {
+                                Ok(response) => {
+                                    if let Err(e) = signaling_client.emit_soac(response).await {
+                                        log::error!("ICE restart answer signaling failed: {}", e);
+                                    }
+                                }
+                                Err(_) => log::error!("ICE restart offer failed (details omitted)"),
+                            }
+                        } else {
+                            log::warn!("ICE restart for unknown connection ignored");
+                        }
                     } else if soac.msg_type == "candidate" {
                         if let Some(sess) = sessions.get(&ice) {
                             if let Err(e) = sess.add_candidate(&soac).await { let _ = e; log::error!("Remote ICE candidate failed (details omitted)"); }

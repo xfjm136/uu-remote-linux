@@ -1592,9 +1592,9 @@ impl WebRtcSession {
         // 同步当前的客户端与房间会话上下文
         {
             let mut ctx = self.context.lock().await;
-            ctx.client_id = soac.client_id.clone();
-            ctx.ice_id = soac.ice_id.clone();
-            ctx.app_control_id = soac.app_control_id.clone();
+            if soac.client_id.is_some() { ctx.client_id = soac.client_id.clone(); }
+            if soac.ice_id.is_some() { ctx.ice_id = soac.ice_id.clone(); }
+            if soac.app_control_id.is_some() { ctx.app_control_id = soac.app_control_id.clone(); }
             log::info!("Updated WebRTC session context: client_id_present={} ice_id_present={}", ctx.client_id.is_some(), ctx.ice_id.is_some());
         }
         let mut sdp_str = soac.sdp.clone().unwrap_or_default();
@@ -1676,6 +1676,17 @@ impl WebRtcSession {
         // Only the copy sent to the viewer is amended: webrtc-rs rejects a local description that
         // differs from the answer it generated. Our receive buffer (1 MB) accepts 256 KB messages.
         Ok(with_max_message_size(&answer.sdp))
+    }
+
+    /// Official SOAC restart_ice carries an offer and requires a restart_ice answer.
+    /// Re-negotiate on this peer, retaining its data channels and media tasks.
+    pub async fn answer_restart(&self, soac: &SoacMessage) -> Result<SoacMessage, String> {
+        if soac.msg_type != "restart_ice" { return Err("Expected ICE restart offer".into()); }
+        let sdp = self.handle_offer(soac).await?;
+        let ctx = self.context.lock().await;
+        Ok(SoacMessage { msg_type: "restart_ice".into(), sdp: Some(sdp), gzip_sdp: None,
+            candidate: None, ice_id: ctx.ice_id.clone(), client_id: ctx.client_id.clone(),
+            app_control_id: ctx.app_control_id.clone(), sdp_mid: None, sdp_mline_index: None })
     }
 
     /// 接收远端 ICE Candidate
