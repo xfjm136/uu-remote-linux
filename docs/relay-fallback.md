@@ -1,6 +1,35 @@
 # 会话内中转切换修复 / Relay fallback
 
 
+
+## 2026-11-04：主动通知、重启发起及真实 TURN 迁移
+
+本轮基线为 `a0a5ccd4c0c0ca65e66a13daf7e18a0c2181c4d1`，保留已有 relay 分支全部更新。
+
+补齐的官方链路为：`be-controlled` 云端参数 → RTCP 质量采样 → `forward_setting/switch_network_notify` → 对端修改候选策略并发送 `restart_ice` offer → 原会话应用 answer → TURN 数据路径。不是监测端直接无条件发送新 offer。
+
+新增一手反编译依据（同一官方隔离副本）：
+
+- `sub_180AED920`：检查开关和配置；无效参数为 loss < 10 或 latency < 200；至少 15 个样本才比较，丢包使用 `int(avg * 100) > threshold`，延迟使用严格大于。触发时清空窗口。这里的 10/200 是参数有效性下限，不是写死的触发阈值。
+- `sub_180DD4090`：采样/通知周期为 1 秒。
+- `sub_1809CD8F0`：发送 `forward_setting`，类型为 `switch_network_notify`。
+- `sub_1809CFCF0`：通知字段为 `transport_type`、`ice_id`、`attempt_switch_type`。自动通知 transport=1，attempt=1 为优先中转，attempt=2 为 TLS 中转。
+- `sub_180DEE2C0` / `sub_180DF1B90`：接收通知后在原连接更新配置，创建重启 offer。第一阶段允许云端 TURN 列表，第二阶段通过 `sub_1809CC720` 只保留 `turns:`。
+
+实现位置：`src/relay.rs` 解析云端开关及阈值、按 SSRC 维护窗口并编码/解析精确通知；`src/relay_session.rs` 按 1 Hz 消费新 RTCP ReceiverReport 样本并发通知，接收通知后发起 relay-only ICE 重启，处理本地主动重启的 answer。协商串行化，未就绪或已有 offer 时拒绝重复发起；没有对应云端 TURN 配置时保留原连接并报固定类别错误。
+
+`SessionIce` 保留本会话云端服务器和凭据；没有内置中转地址或个人凭据。WebRTC/ICE 的新接口只修改下一代收集配置，保留 AgentConn、mux、DTLS 和 SCTP。库的 RTP 启动逻辑同时修正为仅启动已协商的发送方向，防止工具会话中尚未使用的视频轨使重启失败。原来的接收式 `restart_ice` 流程保留。
+
+新增真实 TURN 回归创建完整的合成 TURN 服务、完成认证 allocation：先确认 route=direct，收到切网请求后强制本地主机候选为 relay，交换新 SDP/candidate，确认 route=relay，并验证**原 CONTROL/SCTP 通道**仍能 Echo 往返。测试还验证重复请求不会并发启动协商。TURN 服务库 0.7.1 在删除 allocation 时误关闭共享 listener；夹具中对 listener 的 close 做共享包装并在测试结束显式关闭，避免把服务端缺陷误判为客户端问题。没有通过跳过 allocation 或伪造候选让测试通过。
+
+### 复刻范围与仍需验证的差异
+
+已按证据实现上述协议及主动切换链路，不能声称闭源实现已逐项完全等价：官方媒体统计聚合和 `possible_auto_switch_*` 策略尚未完整还原。本实现采用最近 15 个有效 RTCP 样本的窗口及 RTCP RTT；新报告不足时不重复采样旧数据。只有云端 `auto_switch_network=true` 且 force 阈值有效时自动触发。TLS 已完成协商并恢复连接后停止继续升级，不在无证据情况下发明新的降级协议。
+
+真实 Windows 控制端与网易云 TURN 的弱网端到端验收仍未执行。本地真实 UDP TURN 迁移不能替代 TLS 中转、移动网络、官方重试/超时、同时发起重启等场景的验收。没有修改或启动原安装目录的官方程序，也没有发布其二进制或反编译源码。
+
+本轮验证：主机 **318 通过、8 跳过、0 失败**；ICE 库 **102 通过、0 失败**；viewer 串行 **182 通过、0 失败**。一次并行 viewer 测试在未改动的 WebSocket 测试握手处失败，串行全量复核通过；未将该失败算作通过。所有 Linux 测试位于 `/tmp/uu-relay-replica`。
+
 ## 2026-11-04：补齐官方 `restart_ice` 信令（基于更新后的分支）
 
 修复基线为 `0221f453530ccbb65ecbeb08d8e8f2ca9ceacde6`（v0.2.48），保留分支已有的 UI、防窥、媒体等更新。上次补丁只修复候选收集和重提名，实际弱网切换仍未得到用户验证；这次静态反编译确认还漏掉了官方自定义的协商类型。

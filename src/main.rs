@@ -13,6 +13,7 @@ mod desktop_power;
 mod portal;
 mod network_diagnostics;
 mod session_ice;
+mod relay;
 mod wayland;
 mod auth;
 mod assist;
@@ -911,6 +912,16 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                     if !sessions.values().any(|s| s.role.is_desktop()) { if let Some(portal) = &portal_desktop { portal.end_idle(); } }
                     if let Some(s) = assist.as_mut() { s.tick()?; }
                 }
+                SignalingEvent::ForwardSetting(event) => {
+                    if let Some((ice, stage)) = relay::parse_notification(&event) {
+                        let sessions = webrtc_sessions.lock().await;
+                        if let Some(peer) = sessions.get(&ice) {
+                            if peer.begin_relay_restart(stage, &signaling_client).await.is_err() {
+                                log::warn!("Relay switch notification could not start negotiation (details omitted)");
+                            }
+                        }
+                    }
+                }
                 SignalingEvent::Connected => {
                     log::info!("Signaling handshake established.");
                     static WOL_REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1073,12 +1084,13 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                         // as an offer; sub_180DDBFC0 answers with the same wire type.
                         // Keep the peer, media and independent tool sessions alive.
                         if let Some(sess) = sessions.get(&ice) {
-                            match sess.answer_restart(&soac).await {
-                                Ok(response) => {
+                            match sess.handle_restart(&soac).await {
+                                Ok(Some(response)) => {
                                     if let Err(e) = signaling_client.emit_soac(response).await {
                                         log::error!("ICE restart answer signaling failed: {}", e);
                                     }
                                 }
+                                Ok(None) => log::info!("Relay ICE restart answer applied"),
                                 Err(_) => log::error!("ICE restart offer failed (details omitted)"),
                             }
                         } else {

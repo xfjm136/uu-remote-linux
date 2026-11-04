@@ -7,6 +7,7 @@ use webrtc::peer_connection::{configuration::RTCConfiguration,policy::ice_transp
 pub struct SessionIce {
     servers: Vec<RTCIceServer>,
     relay_only: bool,
+    pub auto_switch: crate::relay::Config,
     #[cfg(test)]
     pub(crate) setting_engine: Option<webrtc::api::setting_engine::SettingEngine>,
 }
@@ -26,7 +27,7 @@ impl SessionIce {
     pub fn from_header(header:&Value)->Self {
         let data=header.get("data").unwrap_or(header);
         let field=|name:&str|header.get(name).or_else(||data.get(name));
-        let mut result=Self { relay_only:field("force_relay").and_then(Value::as_bool).unwrap_or(false),..Default::default() };
+        let mut result=Self { relay_only:field("force_relay").and_then(Value::as_bool).unwrap_or(false),auto_switch:crate::relay::Config::from_header(header),..Default::default() };
         if let Some(servers)=field("iceServers").and_then(Value::as_array) {
             for server in servers.iter().take(16) {
                 let urls=server.get("urls").or_else(||server.get("url"));
@@ -43,9 +44,20 @@ impl SessionIce {
         }
         result
     }
+    pub fn relay_servers(&self, stage: crate::relay::Stage) -> Vec<RTCIceServer> {
+        self.servers.iter().filter_map(|server| {
+            let urls: Vec<_> = server.urls.iter().filter(|url| match stage {
+                crate::relay::Stage::Udp => url.starts_with("turn:") || url.starts_with("turns:"),
+                crate::relay::Stage::Tls => url.starts_with("turns:"),
+            }).cloned().collect();
+            (!urls.is_empty()).then(|| RTCIceServer { urls, ..server.clone() })
+        }).collect()
+    }
+
     pub fn configuration(self)->Result<RTCConfiguration,String> {
         let has_turn=self.servers.iter().any(|server|server.urls.iter().any(|url|url.starts_with("turn:")||url.starts_with("turns:")));
         if self.relay_only && !has_turn { return Err("Relay-only session requested without usable TURN configuration".into()); }
+        log::info!("Automatic relay policy: enabled={} loss_threshold_percent={} latency_threshold_ms={}", self.auto_switch.enabled, self.auto_switch.loss_percent, self.auto_switch.latency_ms);
         let supplied=!self.servers.is_empty();
         let servers=if supplied { self.servers } else { vec![RTCIceServer {
             urls:vec!["stun:stun.l.google.com:19302".into(),"stun:stun1.l.google.com:19302".into(),"stun:stun.miwifi.com:3478".into()],..Default::default()
@@ -88,6 +100,20 @@ fn relay_proxy(value: &str) -> Result<String, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn restart_retains_cloud_credentials_and_tls_stage_excludes_other_transports() {
+        let ice = SessionIce::from_header(&serde_json::json!({"iceServers":[{
+            "urls":["stun:example.invalid","turn:example.invalid?transport=udp","turn:example.invalid?transport=tcp","turns:example.invalid?transport=tcp"],
+            "username":"synthetic-user","credential":"synthetic-password"
+        }]}));
+        let first = ice.relay_servers(crate::relay::Stage::Udp);
+        assert_eq!(first[0].urls.len(), 3);
+        let tls = ice.relay_servers(crate::relay::Stage::Tls);
+        assert_eq!(tls[0].urls, vec!["turns:example.invalid?transport=tcp"]);
+        assert_eq!(tls[0].username, "synthetic-user");
+        assert_eq!(tls[0].credential, "synthetic-password");
+        assert!(SessionIce::default().relay_servers(crate::relay::Stage::Udp).is_empty());
+    }
     #[test]
     fn stream_relays_are_available_without_a_proxy() {
         assert!(relay_transport(None).unwrap().http_proxy.is_none());

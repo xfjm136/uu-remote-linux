@@ -62,15 +62,25 @@ struct Viewer {
     channels: HashMap<String, Arc<RTCDataChannel>>,
     messages: Messages,
     router: Arc<Mutex<webrtc::util::vnet::router::Router>>,
+    turn: Option<crate::test_network::TurnFixture>,
 }
 
 async fn connect(desktop: bool, portal: Option<Arc<crate::desktop_session::PortalDesktop>>)
     -> (WebRtcSession, Viewer) {
+    connect_fixture(desktop, portal, false).await
+}
+async fn connect_fixture(desktop: bool, portal: Option<Arc<crate::desktop_session::PortalDesktop>>, with_turn: bool)
+    -> (WebRtcSession, Viewer) {
     let input = Arc::new(InputInjector::without_desktop());
     let (host_setting, viewer_setting, router) = crate::test_network::virtual_network().await;
     let screen = Arc::new(ScreenCapture::unavailable("synthetic pending desktop".into()));
+    let turn = if with_turn { Some(crate::test_network::turn_server(&router).await) } else { None };
+    let mut transport = if with_turn { crate::session_ice::SessionIce::from_header(&serde_json::json!({
+        "iceServers":[{"urls":"turn:192.0.2.3:3478?transport=udp","username":"test-user","credential":"test-password"}]
+    })) } else { crate::session_ice::SessionIce::local() };
+    transport.setting_engine = Some(host_setting);
     let host = WebRtcSession::new(screen, input, crate::signaling::SignalingClient::disconnected(),
-        desktop, crate::session_ice::SessionIce::virtual_net(host_setting), portal).await.unwrap();
+        desktop, transport, portal).await.unwrap();
     let pc = Arc::new(APIBuilder::new().with_setting_engine(viewer_setting).build().new_peer_connection(RTCConfiguration::default()).await.unwrap());
     let (tx, messages) = mpsc::unbounded_channel();
     let mut channels = HashMap::new();
@@ -98,7 +108,58 @@ async fn connect(desktop: bool, portal: Option<Arc<crate::desktop_session::Porta
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }).await.expect("local SCTP channels did not open");
-    (host, Viewer { pc, channels, messages, router })
+    (host, Viewer { pc, channels, messages, router, turn })
+}
+
+#[tokio::test]
+async fn switch_notification_restarts_over_real_turn_and_preserves_control() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (host, mut viewer) = connect_fixture(false, None, true).await;
+        assert_eq!(crate::network_diagnostics::selected_path(&host.pc).await.unwrap().route, "direct");
+        let pc = host.pc.clone();
+        let channel = viewer.channels["CONTROL_DATA_CHANNEL"].clone();
+        {
+            let mut ctx = host.context.lock().await;
+            ctx.client_id = Some("test-viewer".into());
+            ctx.ice_id = Some(serde_json::json!("test-ice"));
+        }
+        channel.send(&echo_request(80).into()).await.unwrap();
+        assert!(receive(&mut viewer.messages, 3, Duration::from_secs(3)).await.is_some());
+        let (signal, mut outgoing) = crate::signaling::SignalingClient::capture();
+        host.begin_relay_restart(crate::relay::Stage::Udp, &signal).await.unwrap();
+        assert!(host.begin_relay_restart(crate::relay::Stage::Udp, &signal).await.is_err());
+        let frame = outgoing.recv().await.unwrap();
+        let wire: serde_json::Value = serde_json::from_str(frame.trim_start_matches("42")).unwrap();
+        assert_eq!(wire[0], "soac");
+        assert_eq!(wire[1]["data"]["type"], "restart_ice");
+        let mut gathered = host.pc.gathering_complete_promise().await;
+        gathered.recv().await;
+        let offer = host.pc.local_description().await.unwrap();
+        assert!(offer.sdp.lines().any(|l| l.starts_with("a=candidate:") && l.contains(" typ relay")));
+        assert!(offer.sdp.lines().filter(|l| l.starts_with("a=candidate:")).all(|l| l.contains(" typ relay")));
+        viewer.pc.set_remote_description(offer).await.unwrap();
+        let mut gathered = viewer.pc.gathering_complete_promise().await;
+        let answer = viewer.pc.create_answer(None).await.unwrap();
+        viewer.pc.set_local_description(answer.clone()).await.unwrap();
+        gathered.recv().await;
+        let answer = viewer.pc.local_description().await.unwrap();
+        assert!(host.handle_restart(&SoacMessage { msg_type:"restart_ice".into(), sdp:Some(answer.sdp),
+            gzip_sdp:None, candidate:None, ice_id:None, client_id:None, app_control_id:None,
+            sdp_mid:None, sdp_mline_index:None }).await.unwrap().is_none());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if crate::network_diagnostics::selected_path(&host.pc).await.is_some_and(|p| p.route == "relay")
+                    && host.pc.connection_state() == RTCPeerConnectionState::Connected { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("TURN restart did not select a relay");
+        assert!(Arc::ptr_eq(&pc, &host.pc));
+        channel.send(&echo_request(81).into()).await.unwrap();
+        assert!(receive(&mut viewer.messages, 3, Duration::from_secs(5)).await.is_some());
+        viewer.pc.close().await.unwrap(); host.pc.close().await.unwrap();
+        viewer.turn.take().unwrap().close().await.unwrap();
+        viewer.router.lock().await.stop().await.unwrap();
+    }).await.expect("TURN relay migration timed out");
 }
 
 fn body(message: &[u8], number: u32) -> Option<&[u8]> {

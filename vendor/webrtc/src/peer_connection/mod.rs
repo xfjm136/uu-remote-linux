@@ -213,6 +213,16 @@ impl std::fmt::Display for RTCPeerConnection {
 }
 
 impl RTCPeerConnection {
+    /// Local patch: apply validated server/policy changes to the next ICE restart,
+    /// preserving the existing transport, DTLS association and data channels.
+    pub async fn set_restart_ice_servers(&self, servers: Vec<crate::ice_transport::ice_server::RTCIceServer>, relay_only: bool) -> Result<()> {
+        let mut urls = Vec::new();
+        for server in servers { urls.extend(server.urls()?); }
+        let agent = self.internal.ice_gatherer.get_agent().await.ok_or(Error::ErrICEAgentNotExist)?;
+        agent.set_restart_options(urls, relay_only)?;
+        Ok(())
+    }
+
     /// creates a PeerConnection with the default codecs and
     /// interceptors.  See register_default_codecs and register_default_interceptors.
     ///
@@ -1604,6 +1614,9 @@ impl RTCPeerConnection {
     pub(crate) async fn start_rtp_senders(&self) -> Result<()> {
         let current_transceivers = self.internal.rtp_transceivers.lock().await;
         for transceiver in &*current_transceivers {
+            // A restart offer can include a previously unused video transceiver
+            // on a tool-only peer. Do not start RTP for a rejected/recv-only m-line.
+            if !transceiver.current_direction().has_send() { continue; }
             let sender = transceiver.sender().await;
             if sender.is_negotiated() && !sender.has_sent() {
                 sender.send(&sender.get_parameters().await).await?;

@@ -115,12 +115,26 @@ pub struct Agent {
     pub(crate) gathering_state: Arc<AtomicU8>, //GatheringState,
     pub(crate) candidate_types: Vec<CandidateType>,
     pub(crate) urls: Vec<Url>,
+    restart_options: std::sync::RwLock<Option<(Vec<Url>, Vec<CandidateType>)>>,
     pub(crate) network_types: Vec<NetworkType>,
 
     pub(crate) gather_candidate_cancel: Option<GatherCandidateCancelFn>,
 }
 
 impl Agent {
+    /// Configure only the next ICE generation. The existing AgentConn/mux stays alive.
+    pub fn set_restart_options(&self, urls: Vec<Url>, relay_only: bool) -> Result<()> {
+        if self.gathering_state.load(Ordering::SeqCst) == GatheringState::Gathering as u8 {
+            return Err(Error::ErrRestartWhenGathering);
+        }
+        if relay_only && !urls.iter().any(|u| matches!(u.scheme, SchemeType::Turn | SchemeType::Turns)) {
+            return Err(Error::Other("Relay restart requires TURN servers".into()));
+        }
+        let types = if relay_only { vec![CandidateType::Relay] } else { self.candidate_types.clone() };
+        *self.restart_options.write().unwrap() = Some((urls, types));
+        Ok(())
+    }
+
     /// Creates a new Agent.
     pub async fn new(config: AgentConfig) -> Result<Self> {
         let mut mdns_name = config.multicast_dns_host_name.clone();
@@ -209,6 +223,7 @@ impl Agent {
             gathering_state: Arc::new(AtomicU8::new(0)), //GatheringState::New,
             candidate_types,
             urls: config.urls.clone(),
+            restart_options: std::sync::RwLock::new(None),
             network_types: config.network_types.clone(),
 
             gather_candidate_cancel: None, //TODO: add cancel
@@ -451,10 +466,12 @@ impl Agent {
 
         //TODO: a.gatherCandidateCancel = cancel
 
+        let options = self.restart_options.read().unwrap().clone();
+        let (urls, candidate_types) = options.unwrap_or_else(|| (self.urls.clone(), self.candidate_types.clone()));
         let params = GatherCandidatesInternalParams {
             udp_network: self.udp_network.clone(),
-            candidate_types: self.candidate_types.clone(),
-            urls: self.urls.clone(),
+            candidate_types,
+            urls,
             network_types: self.network_types.clone(),
             mdns_mode: self.mdns_mode,
             mdns_name: self.mdns_name.clone(),

@@ -6,6 +6,8 @@ use crate::signaling::SoacMessage;
 
 #[path = "text_outbox.rs"]
 mod text_outbox;
+#[path = "relay_session.rs"]
+mod relay_session;
 
 use base64::Engine;
 use flate2::read::GzDecoder;
@@ -117,6 +119,7 @@ pub struct WebRtcSession {
     pub controller: crate::input::Controller,
     pub context: Arc<Mutex<SessionContext>>,
     actions: Arc<crate::system_actions::PeerActions>,
+    relay: Arc<relay_session::RelaySession>,
 }
 
 /// Counts a desktop session once it is connected (a failed offer is not a session), while the
@@ -262,6 +265,7 @@ impl WebRtcSession {
             .with_interceptor_registry(registry)
             .build();
 
+        let relay = Arc::new(relay_session::RelaySession::new(transport.clone()));
         let config = transport.configuration()?;
 
         let pc = Arc::new(
@@ -274,6 +278,7 @@ impl WebRtcSession {
         if desktop { *role.input.lock().unwrap() = Some(input.desktop_session()); }
         let context = Arc::new(Mutex::new(SessionContext::default()));
         crate::network_diagnostics::start(Arc::downgrade(&pc));
+        relay_session::start_monitor(&relay, &pc, &role, &context, signaling_client.clone());
 
         // 监听本地 ICE Candidate 并自动发回信令服务器与客户端
         let context_ice = context.clone();
@@ -390,6 +395,7 @@ impl WebRtcSession {
         let sender = pc.add_track(video_track.clone()).await
             .map_err(|e| format!("Add video track failed: {}", e))?;
         let idr_on_feedback = idr_request.clone();
+        let relay_feedback = relay.clone();
         tokio::spawn(async move {
             let mut feedback = [0u8; 1500];
             let mut reports = 0usize;
@@ -406,6 +412,13 @@ impl WebRtcSession {
                         }
                     }
                     if let Some(report) = packet.as_any().downcast_ref::<webrtc::rtcp::receiver_report::ReceiverReport>() {
+                        for r in &report.reports {
+                            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                            let ntp = (((now.as_secs()+2_208_988_800)&0xffff)<<16) as u32 | ((u64::from(now.subsec_nanos())*65536/1_000_000_000) as u32);
+                            let elapsed = ntp.wrapping_sub(r.last_sender_report).wrapping_sub(r.delay);
+                            let rtt = (r.last_sender_report != 0 && elapsed < 65536*30).then(|| f64::from(elapsed)*1000./65536.);
+                            relay_feedback.monitor.lock().unwrap().observe(r.ssrc, f64::from(r.fraction_lost)/256., rtt);
+                        }
                         reports += 1;
                         if reports == 1 || reports % 10 == 0 {
                             for r in &report.reports {
@@ -1544,6 +1557,7 @@ impl WebRtcSession {
             controller: crate::input::Controller::Other,
             context,
             actions: session_actions,
+            relay,
         })
     }
 

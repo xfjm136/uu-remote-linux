@@ -55,3 +55,7 @@ binding request per keepalive interval (2 s) while media flows. Checked on the h
 official Android client controlling a Linux host (GNOME, cloud ICE servers incl. TURN) over repeated
 sessions: the client answers every request and sessions stay up. Official Windows/macOS controllers
 have not been tried against the host yet.
+
+## Per-generation relay configuration
+
+`Agent::set_restart_options` stages validated server URLs and candidate types for the next ICE gather. It preserves the AgentConn used by DTLS/SCTP and rejects updates during active gathering. The application retains cloud credentials per peer. The WebRTC wrapper exposes `set_restart_ice_servers`; this does not replace the peer or update unrelated sessions. See docs/relay-fallback.md for official notification evidence and verification limits.

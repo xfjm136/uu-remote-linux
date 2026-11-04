@@ -53,6 +53,7 @@ pub enum SignalingEvent {
     /// ice_id it announces, when present.
     ConnectRequest { capture_type: u64, ice_id: Option<String>, transport:crate::session_ice::SessionIce, controller: crate::input::Controller },
     Soac(SoacMessage),
+    ForwardSetting(Value),
     Released(Value),
     Left(Value),
     Disconnected,
@@ -68,6 +69,10 @@ pub struct SignalingClient {
 
 #[cfg(test)]
 impl SignalingClient {
+    pub fn capture() -> (Arc<Self>, mpsc::Receiver<String>) {
+        let (tx_outgoing, receiver) = mpsc::channel(32);
+        (Arc::new(Self { tx_outgoing, _reconnect_key: Arc::new(std::sync::Mutex::new(None)) }), receiver)
+    }
     pub fn disconnected() -> Arc<Self> {
         Arc::new(Self { tx_outgoing: mpsc::channel(1).0, _reconnect_key: Arc::new(std::sync::Mutex::new(None)) })
     }
@@ -419,6 +424,9 @@ impl SignalingClient {
                                     log::info!("Socket.IO event dispatch: name={}", event_name);
 
                                     match event_name {
+                                        "forward_setting" => {
+                                            if !send_event(&event_sender, SignalingEvent::ForwardSetting(data.clone())).await { break; }
+                                        }
                                         "bmsg_push" => {
                                             if !send_event(&event_sender, SignalingEvent::DeviceInfoChanged(data.clone())).await { break; }
                                         }

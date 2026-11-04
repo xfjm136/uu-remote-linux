@@ -8,6 +8,10 @@ on:
       - src/main.rs
       - src/webrtc.rs
       - src/webrtc_lifecycle_tests.rs
+      - src/relay.rs
+      - src/relay_session.rs
+      - src/signaling.rs
+      - src/test_network.rs
       - src/session_ice.rs
       - vendor/webrtc-ice/**
       - vendor/webrtc/src/peer_connection/sdp/**
